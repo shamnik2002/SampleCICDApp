@@ -1,0 +1,107 @@
+# This is a basic workflow to help you get started with Actions
+
+name: PR Submission
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch 
+  pull_request:
+    branches: [ "develop" ]
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build_and_test:
+    # The type of runner that the job will run on
+    runs-on: macos-26
+    environment: Dev
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26'
+          
+      - name: Install Certificates and Provisioning Profile
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}          
+          
+        run: |
+            # create variables
+            CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+            PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+            KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+            echo "create variables done"
+
+             # import certificate and provisioning profile from secrets
+            echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+            ls -lh "$CERTIFICATE_PATH"
+            echo "certificate exists"
+            file "$CERTIFICATE_PATH"
+            echo "check file type"
+            echo -n "${{ secrets.PROVISIONING_PROFILE_BASE64 }}" | base64 --decode > "$PP_PATH"
+
+            echo "import cert and provisioning profiles done"
+
+            # create keychain
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            echo "create keychain done"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            echo "set keychain done"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            echo "unlock keychain done"
+
+             # import certificates into keychain            
+            security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            echo "import cert and p12 password done"
+            security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            echo "set-key-partition-list done"
+            security list-keychain -d user -s "$KEYCHAIN_PATH"
+            echo "list-keychain done"
+
+            echo "import certificates into keychain done"
+            
+            # import provisioning profile
+            mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+            cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles
+            security find-identity -p codesigning -v
+            security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/build_pp.mobileprovision
+            echo "import provisioning profile done"
+             
+      - name: Cache SPM Dependencies
+        uses: actions/cache@v4
+        id: spm-cache
+        with:
+          path: |
+            
+            ${{ github.workspace }}/DerivedData/**/SourcePackages/checkouts            
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-    
+
+      - name: Build and Test
+        run: |
+          set -euo pipefail 
+          xcodebuild clean test \
+            -project SampleCICDApp/SampleCICDApp.xcodeproj \
+            -scheme "SampleCICDApp" \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17'  \
+            -derivedDataPath $GITHUB_WORKSPACE/DerivedData \
+          | xcbeautify
+
+      - name: Upload xcresult
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcresult
+          path: |
+            ${{ github.workspace }}/DerivedData/Logs/Test/*.xcresult
